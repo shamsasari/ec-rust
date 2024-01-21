@@ -1,7 +1,9 @@
 #![deny(unused_must_use)]
 
 use std::ops::Add;
+
 use num_bigint::{BigUint, ToBigUint};
+use num_traits::{One, zero};
 
 use crate::Point::{Coordinate, Identity};
 
@@ -41,10 +43,19 @@ impl EllipticCurve {
             (Identity, _) => point2.clone(),
             (_, Identity) => point1.clone(),
             (Coordinate(x1, y1), Coordinate(x2, y2)) => {
+                if x1 == x2 && (y1 + y2) % &self.p == zero() {
+                    return Identity;
+                }
                 let s = if point1 != point2 {
+                    // (y2 - y1) / (x2 - x1)
                     div(&sub(&y2, &y1, &self.p), &sub(&x2, &x1, &self.p), &self.p)
                 } else {
-                    (3u32 * x1.square(&self.p) - &self.a) / 2u32 * y1
+                    // (3x1^2 + a) / 2y1
+                    div(
+                        &add(&mult(&big_uint(3), &x1.square(&self.p), &self.p), &self.a, &self.p),
+                        &mult(&big_uint(2), &y1, &self.p),
+                        &self.p
+                    )
                 };
                 // x3 = s^2 - x1 - x2 mod p
                 let x3 = sub(&sub(&s.square(&self.p), &x1, &self.p), &x2, &self.p);
@@ -55,12 +66,20 @@ impl EllipticCurve {
         }
     }
 
-    fn double(point: &Point) -> Point {
-        todo!()
+    fn double(&self, point: &Point) -> Point {
+        self.add(point, point)
     }
 
-    fn scalar_mult(point: &Point, int: &BigUint) -> Point {
-        todo!()
+    fn scalar_mult(&self, point: &Point, d: &BigUint) -> Point {
+        // B = d * A
+        let mut t = point.clone();
+        for i in (0..(d.bits() - 1)).rev() {
+            t = self.double(&t);
+            if d.bit(i) {
+                t = self.add(&t, point);
+            }
+        }
+        t
     }
 }
 
@@ -148,8 +167,6 @@ fn big_uint(value: i32) -> BigUint {
 
 #[cfg(test)]
 mod tests {
-    use num_traits::identities::Zero;
-
     use super::*;
 
     #[test]
@@ -179,7 +196,7 @@ mod tests {
     fn additive_inverse_to_get_identity() {
         let a = big_uint(9);
         let p = big_uint(11);
-        assert_eq!(add(&a, &a.additive_inverse(&p), &p), BigUint::zero());
+        assert_eq!(add(&a, &a.additive_inverse(&p), &p), zero());
     }
 
     #[test]
@@ -206,7 +223,14 @@ mod tests {
     }
 
     #[test]
-    fn ec_point_addition() {
+    fn divide_to_get_identity() {
+        let a = big_uint(15);
+        let p = big_uint(11);
+        assert_eq!(div(&a, &a, &p), big_uint(1));
+    }
+
+    #[test]
+    fn elliptic_curve_point_addition() {
         // y^2 = x^3 + 2x + 2 mod 17
         let ec = EllipticCurve {
             a: big_uint(2),
@@ -215,11 +239,95 @@ mod tests {
         };
 
         // (6, 3) + (5, 1) = (10, 6)
-
         let point1 = Coordinate(big_uint(6), big_uint(3));
         let point2 = Coordinate(big_uint(5), big_uint(1));
+        let result = Coordinate(big_uint(10), big_uint(6));
+        assert_eq!(ec.add(&point1, &point2), result);
+        assert_eq!(ec.add(&point2, &point1), result);
+    }
 
-        assert_eq!(ec.add(&point1, &point2), Coordinate(big_uint(10), big_uint(6)));
+    #[test]
+    fn elliptic_curve_point_addition_with_identity() {
+        // y^2 = x^3 + 2x + 2 mod 17
+        let ec = EllipticCurve {
+            a: big_uint(2),
+            b: big_uint(2),
+            p: big_uint(17)
+        };
+
+        let point = Coordinate(big_uint(6), big_uint(3));
+        assert_eq!(ec.add(&point, &Identity), point);
+        assert_eq!(ec.add(&Identity, &point), point);
+    }
+
+    #[test]
+    fn elliptic_curve_point_addition_reflected_in_x() {
+        // y^2 = x^3 + 2x + 2 mod 17
+        let ec = EllipticCurve {
+            a: big_uint(2),
+            b: big_uint(2),
+            p: big_uint(17)
+        };
+
+        // (5, 16) + (5, 1) = I
+        let point1 = Coordinate(big_uint(5), big_uint(16));
+        let point2 = Coordinate(big_uint(5), big_uint(1));
+        assert_eq!(ec.add(&point1, &point2), Identity);
+        assert_eq!(ec.add(&point2, &point1), Identity);
+    }
+
+    #[test]
+    fn elliptic_curve_point_doubling() {
+        // y^2 = x^3 + 2x + 2 mod 17
+        let ec = EllipticCurve {
+            a: big_uint(2),
+            b: big_uint(2),
+            p: big_uint(17)
+        };
+
+        // (5, 1) + (5, 1) = (6, 3)
+        let point1 = Coordinate(big_uint(5), big_uint(1));
+        let result = Coordinate(big_uint(6), big_uint(3));
+        assert_eq!(ec.double(&point1), result);
+    }
+
+    #[test]
+    fn elliptic_curve_point_doubling_identity() {
+        // y^2 = x^3 + 2x + 2 mod 17
+        let ec = EllipticCurve {
+            a: big_uint(2),
+            b: big_uint(2),
+            p: big_uint(17)
+        };
+
+        assert_eq!(ec.double(&Identity), Identity);
+    }
+
+    #[test]
+    fn elliptic_curve_scalar_multiplication() {
+        // y^2 = x^3 + 2x + 2 mod 17
+        // |G| = 19 (prime) => 19 * A = I
+        let ec = EllipticCurve {
+            a: big_uint(2),
+            b: big_uint(2),
+            p: big_uint(17)
+        };
+
+        let point = Coordinate(big_uint(5), big_uint(1));
+
+        // 2 * (5, 1) = (6, 3)
+        let result = Coordinate(big_uint(6), big_uint(3));
+        assert_eq!(ec.scalar_mult(&point, &big_uint(2)), result);
+
+        // 10 * (5, 1) = (7, 11)
+        let result = Coordinate(big_uint(7), big_uint(11));
+        assert_eq!(ec.scalar_mult(&point, &big_uint(10)), result);
+
+        // 18 * (5, 1) = (5, 16)
+        let result = Coordinate(big_uint(5), big_uint(16));
+        assert_eq!(ec.scalar_mult(&point, &big_uint(18)), result);
+
+        // 19 * (5, 1) = I
+        assert_eq!(ec.scalar_mult(&point, &big_uint(19)), Identity);
     }
 }
-
